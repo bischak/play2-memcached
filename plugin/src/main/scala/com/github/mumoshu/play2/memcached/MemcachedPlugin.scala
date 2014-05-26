@@ -1,22 +1,23 @@
 package com.github.mumoshu.play2.memcached
 
-import java.net.InetSocketAddress
 import java.util.concurrent.TimeUnit
+import scala.collection.JavaConversions._
 import net.spy.memcached.auth.{PlainCallbackHandler, AuthDescriptor}
 import net.spy.memcached.{ConnectionFactoryBuilder, AddrUtil, MemcachedClient}
 import play.api.cache.{CacheAPI, CachePlugin}
-import play.api.{Logger, Play, Application}
-import scala.util.control.Exception._
+import play.api.{Logger, Application}
 import net.spy.memcached.transcoders.{Transcoder, SerializingTranscoder}
 import net.spy.memcached.compat.log.{Level, AbstractLogger}
 
 class Slf4JLogger(name: String) extends AbstractLogger(name) {
 
   val logger = Logger("memcached")
-  
+
   def isDebugEnabled = logger.isDebugEnabled
 
   def isInfoEnabled = logger.isInfoEnabled
+
+  def isTraceEnabled: Boolean = logger.isTraceEnabled
 
   def log(level: Level, msg: AnyRef, throwable: Throwable) {
     val message = msg.toString
@@ -28,22 +29,25 @@ class Slf4JLogger(name: String) extends AbstractLogger(name) {
       case Level.FATAL => logger.error("[FATAL] " + message, throwable)
     }
   }
+
 }
 
 class MemcachedPlugin(app: Application) extends CachePlugin {
 
   lazy val logger = Logger("memcached.plugin")
 
-  lazy val client = {
+  // All clients for write and any for read
+  lazy val clientsAllAny: (Seq[MemcachedClient], MemcachedClient) = {
     System.setProperty("net.spy.log.LoggerImpl", "com.github.mumoshu.play2.memcached.Slf4JLogger")
 
     app.configuration.getString("elasticache.config.endpoint").map { endpoint =>
-      new MemcachedClient(AddrUtil.getAddresses(endpoint))
+      val any = new MemcachedClient(AddrUtil.getAddresses(endpoint))
+      (Seq(any), any)
     }.getOrElse {
       lazy val singleHost = app.configuration.getString("memcached.host").map(AddrUtil.getAddresses)
       lazy val multipleHosts = app.configuration.getString("memcached.1.host").map { _ =>
         def accumulate(nb: Int): String = {
-          app.configuration.getString("memcached." + nb + ".host").map { h => h + " " + accumulate(nb + 1) }.getOrElse("")
+          app.configuration.getString("memcached." + nb + ".host").map { h => h + " " + accumulate(nb + 1)}.getOrElse("")
         }
         AddrUtil.getAddresses(accumulate(1))
       }
@@ -64,16 +68,20 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
           .setAuthDescriptor(ad)
           .build()
 
-        new MemcachedClient(cf, addrs)
+        val any = new MemcachedClient(cf, addrs)
+        val all = addrs.map(addr => new MemcachedClient(cf, Seq(addr)))
+        (all, any)
       }.getOrElse {
-        new MemcachedClient(addrs)
+        val any = new MemcachedClient(addrs)
+        val all = addrs.map(addr => new MemcachedClient(Seq(addr)))
+        (all, any)
       }
     }
   }
 
   import java.io._
-  
-  class CustomSerializing extends SerializingTranscoder{
+
+  class CustomSerializing extends SerializingTranscoder {
 
     // You should not catch exceptions and return nulls here,
     // because you should cancel the future returned by asyncGet() on any exception.
@@ -93,18 +101,18 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
       new ObjectOutputStream(bos).writeObject(obj)
       bos.toByteArray()
     }
-  } 
+  }
 
   lazy val tc = new CustomSerializing().asInstanceOf[Transcoder[Any]]
 
   lazy val api = new CacheAPI {
 
     def get(key: String) =
-    if (key.isEmpty) {
-      None
-    } else {
+      if (key.isEmpty) {
+        None
+      } else {
         logger.debug("Getting the cached for key " + namespace + key)
-        val future = client.asyncGet(namespace + hash(key), tc)
+        val future = clientsAllAny._2.asyncGet(namespace + hash(key), tc)
         try {
           val any = future.get(timeout, timeunit)
           if (any != null) {
@@ -125,25 +133,25 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
           )
         } catch {
           case e: Throwable =>
-            logger.error("An error has occured while getting the value from memcached" , e)
+            logger.error("An error has occured while getting the value from memcached", e)
             future.cancel(false)
             None
         }
-    }
+      }
 
     def set(key: String, value: Any, expiration: Int) {
       if (!key.isEmpty) {
-        client.set(namespace + hash(key), expiration, value, tc)
+        clientsAllAny._1.foreach(_.set(namespace + hash(key), expiration, value, tc))
       }
     }
 
     def remove(key: String) {
       if (!key.isEmpty) {
-        client.delete(namespace + hash(key))
+        clientsAllAny._1.foreach(_.delete(namespace + hash(key)))
       }
     }
   }
-  
+
   lazy val namespace: String = app.configuration.getString("memcached.namespace").getOrElse("")
 
   lazy val timeout: Int = app.configuration.getInt("memcached.timeout").getOrElse(1)
@@ -151,7 +159,7 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
   lazy val timeunit: TimeUnit = {
     app.configuration.getString("memcached.timeunit").getOrElse("seconds") match {
       case "seconds" => TimeUnit.SECONDS
-      case "milliseconds" => TimeUnit.MILLISECONDS 
+      case "milliseconds" => TimeUnit.MILLISECONDS
       case "microseconds" => TimeUnit.MICROSECONDS
       case "nanoseconds" => TimeUnit.NANOSECONDS
       case _ => TimeUnit.SECONDS
@@ -161,8 +169,8 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
   lazy val hashkeys: String = app.configuration.getString("memcached.hashkeys").getOrElse("off")
 
   // you may override hash implementation to use more sophisticated hashes, like xxHash for higher performance
-  protected def hash(key: String): String = if(hashkeys == "off") key
-    else java.security.MessageDigest.getInstance(hashkeys).digest(key.getBytes).map("%02x".format(_)).mkString
+  protected def hash(key: String): String = if (hashkeys == "off") key
+  else java.security.MessageDigest.getInstance(hashkeys).digest(key.getBytes).map("%02x".format(_)).mkString
 
 
   /**
@@ -178,12 +186,13 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
 
   override def onStart() {
     logger.info("Starting MemcachedPlugin.")
-    client
+    clientsAllAny
   }
 
   override def onStop() {
     logger.info("Stopping MemcachedPlugin.")
-    client.shutdown
+    clientsAllAny._1.foreach(_.shutdown())
+    clientsAllAny._2.shutdown()
     Thread.interrupted()
   }
 }

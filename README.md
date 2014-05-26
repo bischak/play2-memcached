@@ -1,4 +1,4 @@
-Memcached Plugin for Play framework 2.0
+Memcached (with replication/mirroring) Plugin for Play framework 2.0
 ---------------------------------------
 
 An implementation of CacheAPI for Play 2.1-RC3 final.
