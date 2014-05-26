@@ -57,6 +57,12 @@ If you have multiple memcached instances over different host names or IP address
   memcached.2.host="mumocached2:11211"
 ```
 
+Enable replication (mirroring) between different memcached instances:
+
+```
+  memcached.mirroring=true
+```
+
 Then, you can use the `play.api.cache.Cache` object to store a value in memcached:
 
 ```scala

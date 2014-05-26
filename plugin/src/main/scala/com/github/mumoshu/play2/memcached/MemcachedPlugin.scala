@@ -55,6 +55,8 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
       val addrs = singleHost.orElse(multipleHosts)
         .getOrElse(throw new RuntimeException("Bad configuration for memcached: missing host(s)"))
 
+      val mirroring = app.configuration.getBoolean("memcached.mirroring").getOrElse(false)
+
       app.configuration.getString("memcached.user").map { memcacheUser =>
         val memcachePassword = app.configuration.getString("memcached.password").getOrElse {
           throw new RuntimeException("Bad configuration for memcached: missing password")
@@ -69,11 +71,11 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
           .build()
 
         val any = new MemcachedClient(cf, addrs)
-        val all = addrs.map(addr => new MemcachedClient(cf, Seq(addr)))
+        val all = if (mirroring) addrs.map(addr => new MemcachedClient(cf, Seq(addr))) else Seq(any)
         (all, any)
       }.getOrElse {
         val any = new MemcachedClient(addrs)
-        val all = addrs.map(addr => new MemcachedClient(Seq(addr)))
+        val all = if (mirroring) addrs.map(addr => new MemcachedClient(Seq(addr))) else Seq(any)
         (all, any)
       }
     }
