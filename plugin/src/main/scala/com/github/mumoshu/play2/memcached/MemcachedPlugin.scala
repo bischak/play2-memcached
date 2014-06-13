@@ -1,13 +1,18 @@
 package com.github.mumoshu.play2.memcached
 
+import java.lang
 import java.util.concurrent.TimeUnit
 import scala.collection.JavaConversions._
-import net.spy.memcached.auth.{PlainCallbackHandler, AuthDescriptor}
-import net.spy.memcached.{ConnectionFactoryBuilder, AddrUtil, MemcachedClient}
+import scala.concurrent.{Await, Future}
+import scala.concurrent.duration._
 import play.api.cache.{CacheAPI, CachePlugin}
 import play.api.{Logger, Application}
+import play.api.libs.concurrent.Execution.Implicits._
+import net.spy.memcached.auth.{PlainCallbackHandler, AuthDescriptor}
+import net.spy.memcached.{ConnectionFactoryBuilder, AddrUtil, MemcachedClient}
 import net.spy.memcached.transcoders.{Transcoder, SerializingTranscoder}
 import net.spy.memcached.compat.log.{Level, AbstractLogger}
+import net.spy.memcached.internal.OperationFuture
 
 class Slf4JLogger(name: String) extends AbstractLogger(name) {
 
@@ -143,14 +148,22 @@ class MemcachedPlugin(app: Application) extends CachePlugin {
 
     def set(key: String, value: Any, expiration: Int) {
       if (!key.isEmpty) {
-        clientsAllAny._1.foreach(_.set(namespace + hash(key), expiration, value, tc))
+        val futures = clientsAllAny._1.map(_.set(namespace + hash(key), expiration, value, tc))
+        if (futures.length > 1) waitForAll(futures)
       }
     }
 
     def remove(key: String) {
       if (!key.isEmpty) {
-        clientsAllAny._1.foreach(_.delete(namespace + hash(key)))
+        val futures = clientsAllAny._1.map(_.delete(namespace + hash(key)))
+        if (futures.length > 1) waitForAll(futures)
       }
+    }
+
+    protected def waitForAll(futures: Seq[OperationFuture[lang.Boolean]]) = {
+      Await.result(Future.sequence(futures.map(f => Future {
+        f.get()
+      })), DurationInt(timeout).seconds)
     }
   }
 
